@@ -85,29 +85,8 @@ df = df[vars_to_use]
 df = df.sort_values('timestamp', 0)
 df = df.apply(lambda x: x.fillna(x.mean()),axis=0)
 
-
-
-#scaler = StandardScaler()
-#scaler.fit(df)
-#df = pd.DataFrame(scaler.transform(df))
-
 window_size = 65
 
-
-
-# X = df[:, :-1]
-# y = df[:, -1]
-# X = df.iloc[:, :-1]
-# y = df.iloc[:, -1]
-
-
-
-# tsne_model = TSNE(n_components=15, random_state=0)
-# X = tsne_model.fit_transform(X)
-#pca = decomposition.PCA(n_components=28)
-#pca.fit(df)
-#df = pca.transform(df)
-#df = pd.DataFrame(df)
 train = df.iloc[:-100000,:].reset_index(drop=True)
 test = df.iloc[-100000:,:].reset_index(drop=True)
 win_train = time_series_windows(train, window_size)
@@ -115,7 +94,7 @@ win_test = time_series_windows(test, window_size)
 features = (window_size*train.shape[1])-train.shape[1]
 
 n_classes = 1
-batch_size = 20
+batch_size = 256
 
 x = tf.placeholder('float', [None, features])
 y = tf.placeholder('float')
@@ -168,11 +147,11 @@ def convolutional_neural_network(x):
 
 def train_neural_network(x):
     prediction = convolutional_neural_network(x)
+    mean_percent_error = tf.reduce_mean(tf.abs(tf.div(tf.sub(y, prediction), y)))
     cost = tf.sqrt(tf.reduce_mean(tf.square(tf.sub(y, prediction))))
-    tf.summary.scalar('Cost', cost)
-    # tf.summary.scalar('Prediction', prediction)
-    optimizer = tf.train.AdamOptimizer(learning_rate=0.0051).minimize(cost)
-
+    tf.summary.scalar('RMSE', cost)
+    optimizer = tf.train.AdamOptimizer(learning_rate=0.0051).minimize(mean_percent_error)
+    tf.summary.scalar('MAPE', mean_percent_error)
     init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
     hm_epochs = 10000
     with tf.Session() as sess:
@@ -188,12 +167,29 @@ def train_neural_network(x):
         for epoch in range(hm_epochs):
             print('Epoch', epoch)
             epoch_loss = 0
+            mini_batch = 0
             for _ in tqdm(range(int(train.shape[0] / batch_size))):
+                mini_batch += 1
                 train_batch = win_train.make_batch(batch_size)
                 epoch_x, epoch_y = train_batch[:,: -train.shape[1]], train_batch[:, -1]
-                summary, _, c = sess.run([merged, optimizer, cost], feed_dict={x: epoch_x, y: epoch_y, keep_prob: 0.5})
+                summary, _, c, mpe = sess.run([merged, optimizer, cost, mean_percent_error],
+                                         feed_dict={x: epoch_x, y: epoch_y, keep_prob: 0.5})
                 epoch_loss += c
                 train_writer.add_summary(summary, epoch)
+                if mini_batch % 100 == 0:
+                    print('RMSE:', c)
+                    print('MAPE:', mpe)
+                    print('Saving model...')
+                    save_path = saver.save(sess, './model.ckpt', epoch)
+                if mini_batch % 2000 == 0:
+                    test_batch = win_test.make_batch(batch_size)
+                    summary, yhat = sess.run([merged, prediction], feed_dict={
+                        x: test_batch[:, :-train.shape[1]], y: test_batch[:, -1], keep_prob: 1.0})
+                    test_writer.add_summary(summary, epoch)
+                    correct = tf.sqrt(tf.reduce_mean(tf.square(tf.sub(y, prediction))))
+                    accuracy = tf.reduce_mean(tf.cast(correct, 'float'))
+                    print('MSE:', accuracy.eval({x: test_batch[:, :-train.shape[1]], y: test_batch[:, -1]}))
+                    print('yhat:', yhat, 'y:', test_batch[:, -1])
             print('Epoch', epoch, 'completed out of', hm_epochs, 'loss:', epoch_loss)
             if epoch % 10 == 0:
                 test_batch = win_test.make_batch(batch_size)
